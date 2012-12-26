@@ -10,4 +10,11 @@
 # Compiled Static libraries
 *.lai
 *.la
-*.a
+# *.a
+
+# visual studio 
+*.sdf
+ipch
+# x64
+
+

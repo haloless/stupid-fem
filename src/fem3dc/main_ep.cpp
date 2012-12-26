@@ -10,6 +10,12 @@
 #include "const.h"
 #pragma comment(lib, "blitz.lib")
 
+#define VTKHELPER_LINKER_PRAGMA
+#include <vtkHelper.hpp>
+#include <vtkHexahedron.h>
+#include <vtkVoxel.h>
+
+
 static FILE *fpDatacheck = NULL;
 static FILE *fpResult = NULL;
 
@@ -1113,16 +1119,166 @@ void utotal(FDArray1 &finalDisp, const FDArray1 &u, const int nstep) {
 	}
 }
 
-// TODO
+/**
+ *
+ * c  NSGAV(i) :  summation number of global node i
+ * c  SGN(J,I) :  j:component i:node number(global)
+ */
+void output_av(
+	const FDArray1 &disp, const FDArray3 &pointStrain, const FDArray3 &pointStress,
+	const FIArray1 &numOfQuadPoints, const FIArray1 &numOfNodes, 
+	const FIArray1 &userElems, const FIArray1 &userNodes, 
+	const FIArray2 &nodeTable,
+	FDArray2 &nodeStress, FDArray2 &nodeStrain, FIArray1 &nsgav) 
+{
+	const int totalNumOfNode = NTN;
+	const int totalNumOfElem = NTE;
+	const int totalNumOfFree = NTF;
+	
+	//c  SGLOCAL(JJ,II) local stress -> II:node number(local),JJ:component
+	FDArray2 FORT_ARR(localStress, ICOM,8), FORT_ARR(localStrain, ICOM,8);
+	zeroFortArray(localStress);
+	zeroFortArray(localStrain);
+	
+	FDArray2 FORT_ARR(qc88, 8,8), FORT_ARR(qc89, 8,8);
+	{
+		qc88(1,1) = 0.2549039E+01; qc88(1,2) = -0.6830133E+00; qc88(1,3) = 0.1830131E+00; qc88(1,4) = -0.6830133E+00; 
+		qc88(1,5) = -0.6830133E+00; qc88(1,6) = 0.1830131E+00; qc88(1,7) = -0.4903840E-01; qc88(1,8) = 0.1830131E+00;
+
+		qc88(2,2) = 0.2549039E+01; qc88(2,3) = -0.6830133E+00; qc88(2,4) = 0.1830131E+00; qc88(2,5) = 0.1830131E+00;
+		qc88(2,6) = -0.6830133E+00; qc88(2,7) = 0.1830131E+00; qc88(2,8) = -0.4903840E-01;
+
+		qc88(3,3) = 0.2549039E+01; qc88(3,4) = -0.6830133E+00; qc88(3,5) = -0.4903840E-01; qc88(3,6) = 0.1830131E+00;
+		qc88(3,7) = -0.6830133E+00; qc88(3,8) = 0.1830131E+00; 
+
+		qc88(4,4) = 0.2549039E+01; qc88(4,5) = 0.1830131E+00; qc88(4,6) = -0.4903840E-01; qc88(4,7) = 0.1830131E+00; 
+		qc88(4,8) = -0.6830133E+00; 
+		
+		qc88(5,5) = 0.2549039E+01; qc88(5,6) = -0.6830133E+00; qc88(5,7) = 0.1830131E+00; qc88(5,8) = -0.6830133E+00; 
+
+		qc88(6,6) = 0.2549039E+01; qc88(6,7) = -0.6830133E+00; qc88(6,8) = 0.1830131E+00;
+
+		qc88(7,7) = 0.2549039E+01; qc88(7,8) = -0.6830133E+00; 
+		
+		qc88(8,8) = 0.2549039E+01;
+	} {
+		qc89(1,1) = 0.1503080E+01; qc89(1,2) = -0.1909162E+00; qc89(1,3) = 0.2424952E-01; qc89(1,4) = -0.1909162E+00; 
+		qc89(1,5) = -0.1909162E+00; qc89(1,6) = 0.2424952E-01; qc89(1,7) = -0.3080088E-02; qc89(1,8) = 0.2424952E-01; 
+
+		qc89(2,2) = 0.1503080E+01; qc89(2,3) = -0.1909162E+00; qc89(2,4) = 0.2424952E-01; qc89(2,5) = 0.2424952E-01; 
+		qc89(2,6) = -0.1909162E+00; qc89(2,7) = 0.2424952E-01; qc89(2,8) = -0.3080088E-02; 
+
+		qc89(3,3) = 0.1503080E+01; qc89(3,4) = -0.1909162E+00; qc89(3,5) = -0.3080088E-02; qc89(3,6) = 0.2424952E-01; 
+		qc89(3,7) = -0.1909162E+00; qc89(3,8) = 0.2424952E-01; 
+
+		qc89(4,4) = 0.1503080E+01; qc89(4,5) = 0.2424952E-01; qc89(4,6) = -0.3080088E-02; qc89(4,7) = 0.2424952E-01; 
+		qc89(4,8) = -0.1909162E+00; 
+
+		qc89(5,5) = 0.1503080E+01; qc89(5,6) = -0.1909162E+00; qc89(5,7) = 0.2424952E-01; qc89(5,8) = -0.1909162E+00; 
+
+		qc89(6,6) = 0.1503080E+01; qc89(6,7) = -0.1909162E+00; qc89(6,8) = 0.2424952E-01; 
+
+		qc89(7,7) = 0.1503080E+01; qc89(7,8) = -0.1909162E+00; 
+
+		qc89(8,8) = 0.1503080E+01; 
+	} {
+		for(int i=1; i<=7; i++) {
+			for(int j=i+1; j<=8; j++) {
+				qc88(j,i) = qc88(i,j);
+				qc89(j,i) = qc89(i,j);
+			}
+		}
+	}
+
+	for(int k=1; k<=totalNumOfNode; k++) {
+		nsgav(k) = 0;
+		for(int j=1; j<=ICOM; j++) {
+			nodeStress(j,k) = 0;
+			nodeStrain(j,k) = 0;
+		}
+	}
+
+	for(int i=1; i<=8; i++) {
+		for(int j=1; j<=ICOM; j++) {
+			localStress(j,i) = 0;
+			localStrain(j,i) = 0;
+		}
+	}
+
+	for(int iElem=1; iElem<=totalNumOfElem; iElem++) { // 100
+		const int iNodeNum = numOfNodes(iElem);
+		const int iPointNum = numOfQuadPoints(iElem);
+
+		if((iNodeNum==8 || iNodeNum==20) && iPointNum==8) {
+			for(int ii=1; ii<=8; ii++) { // 120
+				for(int jj=1; jj<=ICOM; jj++) { // 130
+					localStress(jj,ii) += qc88(ii,1) * pointStress(jj,iElem,1);
+					localStress(jj,ii) += qc88(ii,2) * pointStress(jj,iElem,2);
+					localStress(jj,ii) += qc88(ii,3) * pointStress(jj,iElem,4);
+					localStress(jj,ii) += qc88(ii,4) * pointStress(jj,iElem,3);
+					localStress(jj,ii) += qc88(ii,5) * pointStress(jj,iElem,5);
+					localStress(jj,ii) += qc88(ii,6) * pointStress(jj,iElem,6);
+					localStress(jj,ii) += qc88(ii,7) * pointStress(jj,iElem,8);
+					localStress(jj,ii) += qc88(ii,8) * pointStress(jj,iElem,7);
+					//
+					localStrain(jj,ii) += qc88(ii,1) * pointStrain(jj,iElem,1);
+					localStrain(jj,ii) += qc88(ii,2) * pointStrain(jj,iElem,2);
+					localStrain(jj,ii) += qc88(ii,3) * pointStrain(jj,iElem,4);
+					localStrain(jj,ii) += qc88(ii,4) * pointStrain(jj,iElem,3);
+					localStrain(jj,ii) += qc88(ii,5) * pointStrain(jj,iElem,5);
+					localStrain(jj,ii) += qc88(ii,6) * pointStrain(jj,iElem,6);
+					localStrain(jj,ii) += qc88(ii,7) * pointStrain(jj,iElem,8);
+					localStrain(jj,ii) += qc88(ii,8) * pointStrain(jj,iElem,7);
+				} // 130
+
+				const int nodeId = nodeTable(ii, iElem);
+				nsgav(nodeId) += 1;
+				for(int jj=1; jj<=ICOM; jj++) { // 140
+					nodeStress(jj,nodeId) += localStress(jj,ii);
+					nodeStrain(jj,nodeId) += localStrain(jj,ii);
+				} // 140
+			} // 120
+		} else {
+			fatalError("Average not supported of this element.");
+		}
+
+		for(int i=1; i<=8; i++) {
+			for(int j=1; j<=ICOM; j++) {
+				localStress(j,i) = 0;
+				localStrain(j,i) = 0;
+			}
+		}
+
+	} // 100
+
+	for(int i=1; i<=totalNumOfNode; i++) {
+		//const int iUserElem = userElems(i);
+		int iAveCount = nsgav(i);
+
+		if(iAveCount != 0) {
+			for(int j=1; j<=ICOM; j++) {
+				nodeStress(j,i) = nodeStress(j,i) / iAveCount;
+				nodeStrain(j,i) = nodeStrain(j,i) / iAveCount;
+			}
+		} else {
+			char msg[512]; sprintf_s(msg, "Node %d is lonely node.", i);
+			fatalError(msg);
+		}
+	}
+}
+
+// TODO average values
 void output(FILE *fp,
 	const FDArray1 &x, const FDArray1 &y, const FDArray1 &z, const FDArray1 &disp,
-	const FDArray3 &strain, const FDArray3 &stress, 
+	const FDArray3 &pointStrain, const FDArray3 &pointStress, 
 	const FIArray1 &numOfQuadPoints, const FIArray1 &userElems, const FIArray1 &userNodes,
 	const FDArray2 &nodeStress, const FDArray2 &nodeStrain, const FIArray1 &nsgav)
 {
 	const int totalNumOfNode = NTN;
 	const int totalNumOfElem = NTE;
 	const int totalNumOfFree = NTF;
+
+	int in = 0;
 
 #define PRINT(fmt, ...) fprintf_s(fp, (fmt), __VA_ARGS__)
 #define PRINTLN(fmt, ...) fprintf_s(fp, (fmt "\n"), __VA_ARGS__)
@@ -1133,21 +1289,62 @@ void output(FILE *fp,
 	PRINTLN("DISPLACEMENT");
 	PRINTLN("NODE,Ux,Uy,Uz");
 
-
-	int in = 0;
+	in = 0;
 	for(int i=1; i<=totalNumOfFree; i+=IDIM) {
 		in += 1;
 		int iUserNode = userNodes(in);
 		PRINTLN("%d %lE %lE %lE", iUserNode, disp(i), disp(i+1), disp(i+2));
 	}
 
-	// TODO
 	PRINTLN("S T R E S S");
 	PRINTLN("Element,Int.point,Sx,Sy,Sz,Sxy,Sxz,Syz");
+	for(int i=1; i<=totalNumOfElem; i++) {
+		const int iPointNum = numOfQuadPoints(i);
+		const int iUser = userElems(i);
 
-	// TODO
+		for(int k=1; k<=iPointNum; k++) {
+			PRINT("%d %d ", iUser, k);
+			for(int j=1; j<=ICOM; j++) {
+				PRINT("%lE ", pointStress(j,i,k));
+			}
+			PRINTLN("");
+		}
+	}
+
 	PRINTLN("S T R A I N");
 	PRINTLN("Element,Int.point,ex,ey,ez,exy,exz,eyz");
+	for(int i=1; i<=totalNumOfElem; i++) {
+		const int iPointNum = numOfQuadPoints(i);
+		const int iUser = userElems(i);
+
+		for(int k=1; k<=iPointNum; k++) {
+			PRINT("%d %d ", iUser, k);
+			for(int j=1; j<=ICOM; j++) {
+				PRINT("%lE ", pointStrain(j,i,k));
+			}
+			PRINTLN("");
+		}
+	}
+
+	PRINTLN("AVERAGED AT NODE (STRESS)");
+	for(int i=1; i<=totalNumOfNode; i++) {
+		const int iUser = userNodes(i);
+		
+		PRINTLN("%d %lE %lE %lE %lE %lE %lE", iUser, 
+			nodeStress(1,i),nodeStress(2,i),nodeStress(3,i),
+			nodeStress(4,i),nodeStress(5,i),nodeStress(6,i));
+	}
+	PRINTLN("");
+
+	PRINTLN("AVERAGED AT NODE (STRAIN)");
+	for(int i=1; i<=totalNumOfNode; i++) {
+		const int iUser = userNodes(i);
+		
+		PRINTLN("%d %lE %lE %lE %lE %lE %lE", iUser, 
+			nodeStrain(1,i),nodeStrain(2,i),nodeStrain(3,i),
+			nodeStrain(4,i),nodeStrain(5,i),nodeStrain(6,i));
+	}
+	PRINTLN("");
 
 	PRINTLN("NODE COORDINATE");
 	for(int i=1; i<=totalNumOfNode; i++) {
@@ -1155,16 +1352,169 @@ void output(FILE *fp,
 		PRINTLN("%d %lE %lE %lE", iUserNode, x(i), y(i), z(i));
 	}
 
-	in = 0;
-	for(int i=1; i<=totalNumOfFree; i+=IDIM) {
-		in += 1;
-		int iUserNode = userNodes(in);
-		PRINTLN("%d %lE %lE %lE %lE %lE %lE", 
-			iUserNode, disp(i), disp(i+1), disp(i+2), x(in), y(in), z(in));
-	}
+	//in = 0;
+	//for(int i=1; i<=totalNumOfFree; i+=IDIM) {
+	//	in += 1;
+	//	int iUserNode = userNodes(in);
+	//	PRINTLN("%d %lE %lE %lE %lE %lE %lE", 
+	//		iUserNode, disp(i), disp(i+1), disp(i+2), x(in), y(in), z(in));
+	//}
 
 #undef PRINT
 #undef PRINTLN
+}
+
+void output_vtu(const char *filename, const int iStep,
+	const FDArray1 &x, const FDArray1 &y, const FDArray1 &z, const FDArray1 &disp,
+	const FDArray3 &strain, const FDArray3 &stress, 
+	const FIArray1 &numOfNodes, const FIArray2 &nodesTable,
+	const FIArray1 &numOfQuadPoints, /*const FIArray2 &quadPointsTable,*/
+	const FIArray1 &userElems, const FIArray1 &userNodes,
+	const FDArray2 &nodeStress, const FDArray2 &nodeStrain, const FIArray1 &nsgav, 
+	const FIArray1 &freedomOfLoadPoint, const FDArray1 &loadOfLoadPoint
+	)
+{
+	const int totalNumOfNode = NTN;
+	const int totalNumOfElem = NTE;
+	const int totalNumOfFree = NTF;
+
+	vtkSmartPointer<vtkUnstructuredGrid> grid
+		= vtkHelper_createGrid<vtkUnstructuredGrid>(totalNumOfNode, iStep);
+	vtkSmartPointer<vtkPoints> points = grid->GetPoints();
+
+	NEW_VTKOBJ(vtkCellArray, cells);
+	for(int i=1; i<=totalNumOfElem; i++) {
+		const int iNodeNum = numOfNodes(i);
+		if(iNodeNum != 8) {
+			fatalError("Element is not Hexahedron!");
+		}
+
+		NEW_VTKOBJ(vtkHexahedron, cell);
+		cell->GetPointIds()->SetNumberOfIds(8);
+
+		const int connectivity[] = {
+			2, 3, 4, 1,
+			6, 7, 8, 5,
+		};
+
+		cell->GetPointIds()->SetId(0, nodesTable(2,i)-1);
+		cell->GetPointIds()->SetId(1, nodesTable(3,i)-1);
+		cell->GetPointIds()->SetId(2, nodesTable(4,i)-1);
+		cell->GetPointIds()->SetId(3, nodesTable(1,i)-1);
+
+		cell->GetPointIds()->SetId(4, nodesTable(6,i)-1);
+		cell->GetPointIds()->SetId(5, nodesTable(7,i)-1);
+		cell->GetPointIds()->SetId(6, nodesTable(8,i)-1);
+		cell->GetPointIds()->SetId(7, nodesTable(5,i)-1);
+
+		cells->InsertNextCell(cell);
+
+		if(i == 1) { 
+			std::cout << i << ": ";
+			// 31-21-22-32, 11-1-2-12
+			for(int j=1; j<=iNodeNum; j++) {
+				int jNode = nodesTable(j,i);
+				std::cout << jNode << ", ";
+			}
+			std::cout << std::endl;
+		}
+	}
+	grid->SetCells(VTK_HEXAHEDRON, cells);
+	
+	vtkSmartPointer<vtkDoubleArray> dispArray
+		= vtkHelper_declareField<vtkDoubleArray>(grid, "disp", 3, totalNumOfNode);
+	vtkSmartPointer<vtkDoubleArray> nodeStrainArray
+		= vtkHelper_declareField<vtkDoubleArray>(grid, "nStrain", 9, totalNumOfNode);
+	vtkSmartPointer<vtkDoubleArray> nodeStressArray
+		= vtkHelper_declareField<vtkDoubleArray>(grid, "nStress", 9, totalNumOfNode);
+
+	vtkSmartPointer<vtkDoubleArray> initLoadArray
+		= vtkHelper_declareField<vtkDoubleArray>(grid, "initLoad", 3, totalNumOfNode);
+
+	int in = 0;
+	for(int i=1; i<=totalNumOfFree; i+=IDIM) {
+		in += 1;
+		int idx = in - 1;
+
+		points->SetPoint(idx, x(in), y(in), z(in));
+
+		dispArray->SetTuple3(idx, disp(i), disp(i+1), disp(i+2));
+		{
+			double a11 = nodeStrain(1,in), a22 = nodeStrain(2,in), a33 = nodeStrain(3,in);
+			double a12 = nodeStrain(4,in), a13 = nodeStrain(5,in), a23 = nodeStrain(6,in);
+			nodeStrainArray->SetTuple9(idx, a11,a12,a13, a12,a22,a23, a13,a23,a33);
+		} {
+			double a11 = nodeStress(1,in), a22 = nodeStress(2,in), a33 = nodeStress(3,in);
+			double a12 = nodeStress(4,in), a13 = nodeStress(5,in), a23 = nodeStress(6,in);
+			nodeStressArray->SetTuple9(idx, a11,a12,a13, a12,a22,a23, a13,a23,a33);
+		} {
+			// we zero the BC data first
+			initLoadArray->SetTuple3(idx, 0, 0, 0);
+		}
+	}
+
+	for(int iBC=1; iBC<=NTFOR; iBC++) {
+		int iFree = freedomOfLoadPoint(iBC);
+		int iNode = (iFree-1) / IDIM + 1;
+		int iCoord = (iFree-1) % IDIM + 1;
+		
+		int idx = iNode - 1;
+		double iLoad = loadOfLoadPoint(iBC);
+		
+		double val[IDIM];
+		initLoadArray->GetTuple(idx, val);
+		val[iCoord-1] = iLoad;
+		initLoadArray->GetTuple3(idx)[iCoord-1] = iLoad;
+		initLoadArray->SetTuple(idx, val);
+
+		std::cout << iNode << "," << iCoord << "," << iLoad << std::endl;
+	}
+
+	if(vtkHelper_saveGrid(grid, filename) == 0) {
+		fatalError("Failed to write vtu file.");
+	}
+
+//#define PRINT(fmt, ...) fprintf_s(fp, (fmt), __VA_ARGS__)
+//#define PRINTLN(fmt, ...) fprintf_s(fp, (fmt "\n"), __VA_ARGS__)
+////#define DBL_FMT "%lE"
+//
+//	PRINTLN("NODE,ELEMENT,INT.POINT");
+//	PRINTLN("%d %d %d", totalNumOfNode, totalNumOfElem, numOfQuadPoints(1));
+//	PRINTLN("DISPLACEMENT");
+//	PRINTLN("NODE,Ux,Uy,Uz");
+//
+//
+//	int in = 0;
+//	for(int i=1; i<=totalNumOfFree; i+=IDIM) {
+//		in += 1;
+//		int iUserNode = userNodes(in);
+//		PRINTLN("%d %lE %lE %lE", iUserNode, disp(i), disp(i+1), disp(i+2));
+//	}
+//
+//	// TODO
+//	PRINTLN("S T R E S S");
+//	PRINTLN("Element,Int.point,Sx,Sy,Sz,Sxy,Sxz,Syz");
+//
+//	// TODO
+//	PRINTLN("S T R A I N");
+//	PRINTLN("Element,Int.point,ex,ey,ez,exy,exz,eyz");
+//
+//	PRINTLN("NODE COORDINATE");
+//	for(int i=1; i<=totalNumOfNode; i++) {
+//		int iUserNode = userNodes(i);
+//		PRINTLN("%d %lE %lE %lE", iUserNode, x(i), y(i), z(i));
+//	}
+//
+//	in = 0;
+//	for(int i=1; i<=totalNumOfFree; i+=IDIM) {
+//		in += 1;
+//		int iUserNode = userNodes(in);
+//		PRINTLN("%d %lE %lE %lE %lE %lE %lE", 
+//			iUserNode, disp(i), disp(i+1), disp(i+2), x(in), y(in), z(in));
+//	}
+//
+//#undef PRINT
+//#undef PRINTLN
 }
 
 
@@ -1328,6 +1678,7 @@ int main(int argc, char **argv) {
 		check();
 
 		init(SG, EP);
+		zeroFortArray(FBNow);
 
 		// calculate load increment
 		for(int i=1; i<=NTFOR; i++) {
@@ -1427,6 +1778,7 @@ int main(int argc, char **argv) {
 
 			// update displacement
 			udata(U, UNow);
+			FBNow += FB;
 
 		} // end of load incr.
 
@@ -1434,12 +1786,20 @@ int main(int argc, char **argv) {
 		utotal(U, UNow, nStep);
 
 		// TODO average output
+		output_av(U, EP, SG, 
+			NGNG, NMTE, NEUS, NNUS, NN, 
+			SGN, EPN, NSGAV);
+
+
 
 		// output point values
-		//SGN;
 		output(fpResult, x, y, z, U, EP, SG,
 			NGNG, NEUS, NNUS, 
 			SGN, EPN, NSGAV);
+		output_vtu("result1000.vtu", nStep, x, y, z, U, EP, SG, 
+			NMTE, NN, NGNG, NEUS, NNUS, 
+			SGN, EPN, NSGAV, 
+			IFor, FBNow);
 
 		// dump some instant values
 		for(int kk=1; kk<=IRD; kk++) { // element 1
