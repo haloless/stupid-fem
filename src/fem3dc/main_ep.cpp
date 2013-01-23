@@ -14,6 +14,7 @@
 #include <vtkHelper.hpp>
 #include <vtkHexahedron.h>
 #include <vtkVoxel.h>
+#include <vtkCellData.h>
 
 
 static FILE *fpDatacheck = NULL;
@@ -51,8 +52,13 @@ void data(const char* filename, FILE *fpLog,
 		fatalError(msg);
 	}
 
+	const int bufsize = 1024;
+	char buf[bufsize];
+
 #define DATACHECK(fmt, ...) fprintf_s(fpLog, fmt, __VA_ARGS__)
-#define DATASCAN(fmt, ...) fscanf_s(fpData, fmt, __VA_ARGS__)
+//#define DATASCAN(fmt, ...) fscanf_s(fpData, fmt, __VA_ARGS__)
+#define DATASCAN(fmt, ...) while(fgets(buf,bufsize,fpData) && (buf[0]=='#')); \
+	sscanf_s(buf, fmt, __VA_ARGS__)
 	
 	// line 1
 	DATASCAN("%d", &nstep);			// increments
@@ -395,6 +401,7 @@ void newton_cotes(FDArray1 &localXi, FDArray1 &localEta, FDArray1 &localZeta,
 	}
 }
 
+
 // 3D D-matrix, set DMat
 void DMat(const FDArray2 &elastoConstants, 
 	FDArray2 &DMat, 
@@ -429,8 +436,122 @@ void DMat(const FDArray2 &elastoConstants,
 	}
 }
 
+// zero DMat first
+inline void calcElasticPart(FDArray2 &DMat, 
+	const double young, const double poisson) 
+{
+	const double c = young / (1.0+poisson) / (1.0-2.0*poisson);
+	const double ess = c * (1.0-poisson);
+	const double c44 = c * 0.5 * (1.0-2.0*poisson);
+	const double c12 = c * poisson;
+
+	// diagonal comp.
+	for(int iComp=1; iComp<=3; iComp++) {
+		DMat(iComp, iComp) = ess;
+		DMat(iComp+3, iComp+3) = c44;
+	}
+	// deviatoric comp.
+	DMat(1,2) = c12; DMat(2,1) = c12;
+	DMat(1,3) = c12; DMat(3,1) = c12;
+	DMat(2,3) = c12; DMat(3,2) = c12;
+}
+inline void getDeviatoricPart(const int jElem, const int kPoint,
+	FDArray1 &devPart, const FDArray3 &stress) 
+{
+	for(int i=1; i<=ICOM; i++) {
+		devPart(i) = stress(i,jElem,kPoint);
+	}
+	
+	double ave = (devPart(1) + devPart(2) + devPart(3)) / 3;
+	devPart(1) -= ave;
+	devPart(2) -= ave;
+	devPart(3) -= ave;
+}
+inline double calcVonMisesStress(const FDArray1 &devPart) {
+	double s11=devPart(1), s22=devPart(2), s33=devPart(3);
+	double s12=devPart(4), s13=devPart(5), s23=devPart(6);
+
+	double mises = s11*s11 + s22*s22 + s33*s33 
+		+ (s12*s12 + s13*s13 + s23*s23) * 2;
+	mises = sqrt(1.5 * mises);
+
+	return mises;
+}
+
 /**
- * 
+ *
+ */
+int DpMat(const int jElem, const int kPoint,
+	FDArray2 &DpMat, const FDArray3 &stress,
+	FIArray2 &epState, FDArray2 &equivStress,
+	const FDArray2 &elastoConstants, 
+	const FIArray1 &materialTypeOfElem, const FIArray1 &materialCharacters) 
+{
+	int stat = 0; // elastic
+
+	const int jMaterial = materialTypeOfElem(jElem); // 
+	const int jMatterType = materialCharacters(jMaterial); // isotropic?
+
+	FDArray1 FORT_ARR(devStress, ICOM);
+
+	zeroFortArray(DpMat);
+	zeroFortArray(devStress);
+
+	if(jMatterType == MATERIALCHAR_ISOTROPIC) { // isotropic: 1
+		const double young = elastoConstants(1, jMaterial);
+		const double poisson = elastoConstants(2, jMaterial);
+		const double yield = elastoConstants(3, jMaterial);
+		
+		// C^e
+		calcElasticPart(DpMat, young, poisson);
+
+		// deviatoric stress
+		getDeviatoricPart(jElem, kPoint, devStress, stress);
+
+		// von mises
+		const double kMisesStress = calcVonMisesStress(devStress);
+
+		if(kMisesStress-yield >= 0) { // yielded
+			stat = 1; // plastic
+			//printf("Elem%d Point%d yielded\n", jElem, kPoint);
+
+
+			// calc C^e - C^p matrix
+			const double shearMod = 0.5 * young / (1.0+poisson);
+			const double cp = 3.0 * shearMod / (kMisesStress*kMisesStress);
+			for(int i=1; i<=ICOM; i++) {
+				for(int j=1; j<=ICOM; j++) {
+					DpMat(i,j) -= devStress(i) * devStress(j) * cp;
+				}
+			}
+		}
+
+		//
+		epState(jElem, kPoint) = stat;
+		equivStress(jElem, kPoint) = kMisesStress;
+	} else { // anisotropic: 2
+		fatalError("anisotropic not supported.");
+	}
+
+	return stat;
+}
+
+
+/**
+ * save D: ICOM x ICOM
+ */
+void DMMat(const FDArray2 &D, const int quadPointID, FDArray3 &DM, const FIArray1 &numOfNodes) {
+	const int iElem = IE;
+
+	for(int i=1; i<=ICOM; i++) {
+		for(int j=1; j<=ICOM; j++) {
+			DM(quadPointID, i, j) = D(i, j);
+		}
+	}
+}
+
+/**
+ * shape function
  */
 void integ(double xi, double eta, double zeta, 
 	FDArray1 &shapeFuncN, FDArray1 &dNdXi, FDArray1 &dNdEta, FDArray1 &dNdZeta,
@@ -1075,22 +1196,57 @@ void strain(
 
 }
 
-void stress(FDArray2 &D, const FDArray3 &strainIncr, 
+//// old version, elasticity only
+//void stress(FDArray2 &D, const FDArray3 &strainIncr, 
+//	FDArray3 &stress, FDArray3 &stressIncr, const FIArray1 &numOfQuadPoints) 
+//{
+//	const int totalNumOfElem = NTE;
+//
+//	for(int iElem=1; iElem<=totalNumOfElem; iElem++) { // 100
+//		const int iQuadPointNum = numOfQuadPoints(iElem);
+//
+//		for(int kk=1; kk<=iQuadPointNum; kk++) { // 105
+//			for(int i=1; i<=ICOM; i++) {
+//				stressIncr(i,iElem,kk) = 0;
+//			}
+//
+//			for(int i=1; i<=ICOM; i++) {
+//				for(int j=1; j<=ICOM; j++) {
+//					stressIncr(i,iElem,kk) += D(i,j) * strainIncr(j,iElem,kk);
+//				}
+//			}
+//
+//			for(int i=1; i<=ICOM; i++) {
+//				stress(i,iElem,kk) += stressIncr(i,iElem,kk);
+//			}
+//		} // 105
+//	} // 100
+//}
+
+/*
+ *
+ */
+void stress(FDArray3 &DM, const FDArray3 &strainIncr, 
 	FDArray3 &stress, FDArray3 &stressIncr, const FIArray1 &numOfQuadPoints) 
 {
 	const int totalNumOfElem = NTE;
+
+	int kQuadPoint = 0;
 
 	for(int iElem=1; iElem<=totalNumOfElem; iElem++) { // 100
 		const int iQuadPointNum = numOfQuadPoints(iElem);
 
 		for(int kk=1; kk<=iQuadPointNum; kk++) { // 105
+			// global id for current quad. point
+			kQuadPoint += 1;
+
 			for(int i=1; i<=ICOM; i++) {
 				stressIncr(i,iElem,kk) = 0;
 			}
 
 			for(int i=1; i<=ICOM; i++) {
 				for(int j=1; j<=ICOM; j++) {
-					stressIncr(i,iElem,kk) += D(i,j) * strainIncr(j,iElem,kk);
+					stressIncr(i,iElem,kk) += DM(kQuadPoint,i,j) * strainIncr(j,iElem,kk);
 				}
 			}
 
@@ -1371,7 +1527,8 @@ void output_vtu(const char *filename, const int iStep,
 	const FIArray1 &numOfQuadPoints, /*const FIArray2 &quadPointsTable,*/
 	const FIArray1 &userElems, const FIArray1 &userNodes,
 	const FDArray2 &nodeStress, const FDArray2 &nodeStrain, const FIArray1 &nsgav, 
-	const FIArray1 &freedomOfLoadPoint, const FDArray1 &loadOfLoadPoint
+	const FIArray1 &freedomOfLoadPoint, const FDArray1 &loadOfLoadPoint,
+	const FIArray2 &epStateOfQuadPoints
 	)
 {
 	const int totalNumOfNode = NTN;
@@ -1409,7 +1566,7 @@ void output_vtu(const char *filename, const int iStep,
 
 		cells->InsertNextCell(cell);
 
-		if(i == 1) { 
+		if(false && i==1) { 
 			std::cout << i << ": ";
 			// 31-21-22-32, 11-1-2-12
 			for(int j=1; j<=iNodeNum; j++) {
@@ -1428,8 +1585,8 @@ void output_vtu(const char *filename, const int iStep,
 	vtkSmartPointer<vtkDoubleArray> nodeStressArray
 		= vtkHelper_declareField<vtkDoubleArray>(grid, "nStress", 9, totalNumOfNode);
 
-	vtkSmartPointer<vtkDoubleArray> initLoadArray
-		= vtkHelper_declareField<vtkDoubleArray>(grid, "initLoad", 3, totalNumOfNode);
+	vtkSmartPointer<vtkDoubleArray> loadArray
+		= vtkHelper_declareField<vtkDoubleArray>(grid, "load", 3, totalNumOfNode);
 
 	int in = 0;
 	for(int i=1; i<=totalNumOfFree; i+=IDIM) {
@@ -1449,7 +1606,7 @@ void output_vtu(const char *filename, const int iStep,
 			nodeStressArray->SetTuple9(idx, a11,a12,a13, a12,a22,a23, a13,a23,a33);
 		} {
 			// we zero the BC data first
-			initLoadArray->SetTuple3(idx, 0, 0, 0);
+			loadArray->SetTuple3(idx, 0, 0, 0);
 		}
 	}
 
@@ -1462,59 +1619,39 @@ void output_vtu(const char *filename, const int iStep,
 		double iLoad = loadOfLoadPoint(iBC);
 		
 		double val[IDIM];
-		initLoadArray->GetTuple(idx, val);
+		loadArray->GetTuple(idx, val);
 		val[iCoord-1] = iLoad;
-		initLoadArray->GetTuple3(idx)[iCoord-1] = iLoad;
-		initLoadArray->SetTuple(idx, val);
+		loadArray->GetTuple3(idx)[iCoord-1] = iLoad;
+		loadArray->SetTuple(idx, val);
 
-		std::cout << iNode << "," << iCoord << "," << iLoad << std::endl;
+		//std::cout << iNode << "," << iCoord << "," << iLoad << std::endl;
 	}
 
+	/*
+	 * cell data
+	 */
+	NEW_VTKOBJ(vtkDoubleArray, epStateArray);
+	epStateArray->SetName("e/p");
+	epStateArray->SetNumberOfComponents(1);
+	epStateArray->SetNumberOfTuples(totalNumOfElem);
+	grid->GetCellData()->AddArray(epStateArray);
+
+	for(int i=1; i<=totalNumOfElem; i++) {
+		const int iNodeNum = numOfNodes(i);
+
+		double iStat = 0;
+		for(int k=1; k<=iNodeNum; k++) {
+			iStat += epStateOfQuadPoints(i,k);
+		}
+		iStat /= iNodeNum;
+
+		epStateArray->SetValue(i-1, iStat);
+	}
+
+	// save
 	if(vtkHelper_saveGrid(grid, filename) == 0) {
 		fatalError("Failed to write vtu file.");
 	}
-
-//#define PRINT(fmt, ...) fprintf_s(fp, (fmt), __VA_ARGS__)
-//#define PRINTLN(fmt, ...) fprintf_s(fp, (fmt "\n"), __VA_ARGS__)
-////#define DBL_FMT "%lE"
-//
-//	PRINTLN("NODE,ELEMENT,INT.POINT");
-//	PRINTLN("%d %d %d", totalNumOfNode, totalNumOfElem, numOfQuadPoints(1));
-//	PRINTLN("DISPLACEMENT");
-//	PRINTLN("NODE,Ux,Uy,Uz");
-//
-//
-//	int in = 0;
-//	for(int i=1; i<=totalNumOfFree; i+=IDIM) {
-//		in += 1;
-//		int iUserNode = userNodes(in);
-//		PRINTLN("%d %lE %lE %lE", iUserNode, disp(i), disp(i+1), disp(i+2));
-//	}
-//
-//	// TODO
-//	PRINTLN("S T R E S S");
-//	PRINTLN("Element,Int.point,Sx,Sy,Sz,Sxy,Sxz,Syz");
-//
-//	// TODO
-//	PRINTLN("S T R A I N");
-//	PRINTLN("Element,Int.point,ex,ey,ez,exy,exz,eyz");
-//
-//	PRINTLN("NODE COORDINATE");
-//	for(int i=1; i<=totalNumOfNode; i++) {
-//		int iUserNode = userNodes(i);
-//		PRINTLN("%d %lE %lE %lE", iUserNode, x(i), y(i), z(i));
-//	}
-//
-//	in = 0;
-//	for(int i=1; i<=totalNumOfFree; i+=IDIM) {
-//		in += 1;
-//		int iUserNode = userNodes(in);
-//		PRINTLN("%d %lE %lE %lE %lE %lE %lE", 
-//			iUserNode, disp(i), disp(i+1), disp(i+2), x(in), y(in), z(in));
-//	}
-//
-//#undef PRINT
-//#undef PRINTLN
 }
 
 
@@ -1580,8 +1717,11 @@ int main(int argc, char **argv) {
 	FDArray1 FORT_ARR(aXi, IRD), FORT_ARR(aEta, IRD), FORT_ARR(aZeta, IRD);
 	//c  H(i)   : weight parameter of i-th integration point
 	FDArray1 FORT_ARR(H, IRD);
-	//c  D(i,j) : elastic matrix (1-x,2-y,3-z,4-xy,5-xz,6-yz)
+	
+	//c  D(i,j) : elasto-plastic matrix (1-x,2-y,3-z,4-xy,5-xz,6-yz)
 	FDArray2 FORT_ARR(D, ICOM,ICOM);
+	// DM(i,*,*): i-th point's elastic matrix 
+	FDArray3 FORT_ARR(DM, INA,ICOM,ICOM);
 
 	//c  C(i,j)  : BT(INMNM,6)*D(6,6)*B(6,INMNM) Bt*D*B
 	//c  EK(i,j) : element stiffness matrix 
@@ -1651,6 +1791,11 @@ int main(int argc, char **argv) {
 	FDArray1 FORT_ARR(NIf, INMTE);
 	FDArray1 FORT_ARR(DXIf, INMTE), FORT_ARR(DETIf, INMTE), FORT_ARR(DZEIf, INMTE);
 
+	// for elasto-plastic behavior on each quad. point
+	// 0: elastic, 1: plastic
+	FIArray2 FORT_ARR(epState, IELM,IRD);
+	FDArray2 FORT_ARR(misesStress, IELM,IRD);
+
 	// 
 	fpDatacheck = fopen("datacheck.dat", "w");
 	fpResult = fopen("result.dat", "w");
@@ -1661,13 +1806,14 @@ int main(int argc, char **argv) {
 	
 
 	if(1) {
-		int nStep = 100;
+		int nStep = 1000;
 		data("input.dat", fpDatacheck, 
 			NMTE, ECon, NN, x, y, z,
 			IFor, FB, IDis, UB, NGNG,
 			NoM, IECon, NEUS, NNUS, NKind,
 			nStep);
 
+		// estimate (half) band with of the global matrix
 		band(NN, NMTE, fpDatacheck);
 
 		// intern some global variables
@@ -1679,6 +1825,7 @@ int main(int argc, char **argv) {
 
 		init(SG, EP);
 		zeroFortArray(FBNow);
+		zeroFortArray(epState);
 
 		// calculate load increment
 		for(int i=1; i<=NTFOR; i++) {
@@ -1687,8 +1834,6 @@ int main(int argc, char **argv) {
 
 		// load incr loop
 		for(int iStep=1; iStep<=nStep; iStep++) { // incr
-			printf("Increment Step %d in %d total\n", iStep, nStep);
-
 			clear(EK, GK, F);
 
 			int currentQuadPoint = 0; // through number of integration point
@@ -1711,12 +1856,19 @@ int main(int argc, char **argv) {
 
 					double detJ = 0;
 
-					// elastic matrix
-					// TODO change this subroutine to dpmat.f
-					DMat(ECon, D, NoM, IECon);
-
 					// count current quad. point
 					currentQuadPoint += 1;
+
+					// elastic matrix
+					//// TODO change this subroutine to dpmat.f
+					//DMat(ECon, D, NoM, IECon);
+
+					// elasto-plastic matrix
+					DpMat(iElem, kPoint, D, SG, epState, misesStress, 
+						ECon, NoM, IECon);
+
+					// save D mat of quad. point
+					DMMat(D, currentQuadPoint, DM, NMTE);
 					
 					// setup shape function N, dNdXi, dNdEta, dNdZeta
 					integ(xi, eta, zeta, 
@@ -1773,33 +1925,56 @@ int main(int argc, char **argv) {
 			strain(NN, U, EP, BM, NMTE, NGNG, EPDash);
 
 			// stress D*strain
-			// TODO D belongs to each element, not universe
-			stress(D, EPDash, SG, SGDASH, NGNG);
+			//// TODO D belongs to each element, not universal
+			//stress(D, EPDash, SG, SGDASH, NGNG);
+			stress(DM, EPDash, SG, SGDASH, NGNG);
 
-			// update displacement
+			// update displacement and loading
 			udata(U, UNow);
 			FBNow += FB;
 
+
+			if(iStep % 100 == 0) {
+				printf("Increment Step %d in %d total\n", iStep, nStep);
+			}
+
+			if(1) {
+				const int totalOutputCount = 100;
+				int outputInterval = std::max(nStep / totalOutputCount, 1);
+				if(iStep % outputInterval == 0) {
+					// average output
+					output_av(UNow, EP, SG, 
+						NGNG, NMTE, NEUS, NNUS, NN, 
+						SGN, EPN, NSGAV);
+
+					char filename[128];
+					sprintf_s(filename, "output/result%06d.vtu", iStep/outputInterval);
+					output_vtu(filename, iStep, 
+						x, y, z, UNow, EP, SG, 
+						NMTE, NN, NGNG, NEUS, NNUS, 
+						SGN, EPN, NSGAV, 
+						IFor, FBNow,
+						epState);
+				}
+			}
 		} // end of load incr.
 
 		// final displacement
 		utotal(U, UNow, nStep);
 
-		// TODO average output
+		// average output
 		output_av(U, EP, SG, 
 			NGNG, NMTE, NEUS, NNUS, NN, 
 			SGN, EPN, NSGAV);
-
-
-
 		// output point values
 		output(fpResult, x, y, z, U, EP, SG,
 			NGNG, NEUS, NNUS, 
 			SGN, EPN, NSGAV);
-		output_vtu("result1000.vtu", nStep, x, y, z, U, EP, SG, 
+		output_vtu("result.vtu", nStep, x, y, z, U, EP, SG, 
 			NMTE, NN, NGNG, NEUS, NNUS, 
 			SGN, EPN, NSGAV, 
-			IFor, FBNow);
+			IFor, FBNow,
+			epState);
 
 		// dump some instant values
 		for(int kk=1; kk<=IRD; kk++) { // element 1
